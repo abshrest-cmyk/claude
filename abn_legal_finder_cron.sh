@@ -1,25 +1,38 @@
 #!/bin/bash
-# Cron wrapper script for ABN Legal Finder
-# Automatically runs with current month and year for NSW
+# ABN Legal Finder - Desktop Shortcut / Cron Script
+# Runs with current month/year for specified state (default: NSW)
+#
+# Usage:
+#   ./abn_legal_finder_cron.sh              # Current month, NSW
+#   ./abn_legal_finder_cron.sh VIC          # Current month, Victoria
+#   ./abn_legal_finder_cron.sh NSW 11 2024  # Specific month/year
 
-# Get current month and year
-MONTH=$(date +%-m)
-YEAR=$(date +%Y)
-STATE="NSW"
+# Parse arguments or use defaults
+STATE="${1:-NSW}"
+MONTH="${2:-$(date +%-m)}"
+YEAR="${3:-$(date +%Y)}"
 
-# Log file
-LOG_DIR="$HOME/Documents/ABN_Legal_Finder/logs"
+# Create directories
+OUTPUT_DIR="$HOME/Documents/ABN_Legal_Finder"
+LOG_DIR="$OUTPUT_DIR/logs"
 mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/cron_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).log"
 
-# Run the script and log output
-echo "Running ABN Legal Finder at $(date)" >> "$LOG_FILE"
-echo "Parameters: Month=$MONTH, Year=$YEAR, State=$STATE" >> "$LOG_FILE"
-echo "----------------------------------------" >> "$LOG_FILE"
+echo "=============================================="
+echo "ABN Legal Finder - Quick Run"
+echo "=============================================="
+echo "State: $STATE"
+echo "Month: $MONTH"
+echo "Year:  $YEAR"
+echo "Log:   $LOG_FILE"
+echo "=============================================="
 
+# Run the script with unbuffered output for real-time progress
 cd /home/user/claude
-/usr/bin/python3 /home/user/claude/abn_legal_finder.py "$MONTH" "$YEAR" "$STATE" >> "$LOG_FILE" 2>&1
+/usr/bin/python3 -u /home/user/claude/abn_legal_finder.py "$MONTH" "$YEAR" "$STATE" 2>&1 | tee "$LOG_FILE"
 
-echo "----------------------------------------" >> "$LOG_FILE"
-echo "Completed at $(date)" >> "$LOG_FILE"
-echo "" >> "$LOG_FILE"
+echo ""
+echo "=============================================="
+echo "Completed at $(date)"
+echo "Results saved to: $OUTPUT_DIR"
+echo "=============================================="

@@ -7,7 +7,9 @@ Connects to Australian Business Register API to find newly registered legal busi
 import sys
 import csv
 import os
+import re
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -16,11 +18,64 @@ from pathlib import Path
 ABR_BASE_URL = "https://abr.business.gov.au/ABRXMLSearch/AbrXmlSearch.asmx"
 AUTH_GUID = "60ff3b3e-c2f4-4e9d-a086-78c396e7013d"
 
-# Legal business keywords (case insensitive)
-LEGAL_KEYWORDS = [
-    'lawyer', 'law', 'solicitor', 'legal', 'conveyancer',
-    'conveyancing', 'barrister', 'attorney', 'notary'
+# Legal business patterns (regex with word boundaries for accuracy)
+LEGAL_PATTERNS = [
+    r'\blaw\s+firm\b',
+    r'\blaw\s+office\b',
+    r'\blaw\s+practice\b',
+    r'\blaw\s+group\b',
+    r'\blawyers?\b',
+    r'\bsolicitors?\b',
+    r'\bbarristers?\b',
+    r'\blegal\b',
+    r'\bconveyancers?\b',
+    r'\bconveyancing\b',
+    r'\battorneys?\b',
+    r'\bnotary\b',
+    r'\bnotaries\b',
+    r'\bchambers\b',
+    r'\badvocates?\b',
+    r'\bcounsel\b',
+    r'\blitigation\b',
+    r'\bmediation\b',
+    r'\blegal\s+services?\b',
+    r'\blegal\s+practice\b',
+    r'\bfamily\s+law\b',
+    r'\bcriminal\s+law\b',
+    r'\bproperty\s+law\b',
+    r'\bcorporate\s+law\b',
+    r'\bimmigration\s+law\b',
+    r'\b\w+\s+law\s+\w*\b',  # catches "X Law Firm", "X Law Group" etc.
 ]
+
+# Exclusion patterns to filter out false positives (names, unrelated businesses)
+EXCLUSION_PATTERNS = [
+    r'\blawson\b',
+    r'\blawler\b',
+    r'\blawrence\b',
+    r'\blawton\b',
+    r'\blawrie\b',
+    r'\blawless\b',
+    r'\bslaughter\b',    # common surname
+    r'\bmother[\s-]?in[\s-]?law\b',
+    r'\bfather[\s-]?in[\s-]?law\b',
+    r'\bson[\s-]?in[\s-]?law\b',
+    r'\bdaughter[\s-]?in[\s-]?law\b',
+    r'\bbrother[\s-]?in[\s-]?law\b',
+    r'\bsister[\s-]?in[\s-]?law\b',
+    r'\bin[\s-]?laws?\b',
+    r'\bbylaw\b',
+    r'\boutlaw\b',
+    r'\bcoleslaw\b',
+    r'\bslaw\b',
+]
+
+# Compile regex patterns for performance
+LEGAL_REGEX = [re.compile(p, re.IGNORECASE) for p in LEGAL_PATTERNS]
+EXCLUSION_REGEX = [re.compile(p, re.IGNORECASE) for p in EXCLUSION_PATTERNS]
+
+# Global session for connection pooling
+SESSION = requests.Session()
 
 def search_by_registration_event(state, month, year):
     """
@@ -50,7 +105,7 @@ def search_by_registration_event(state, month, year):
 
     try:
         print(f"Searching for registrations in {state} for {month}/{year}...")
-        response = requests.post(endpoint, data=soap_body, headers=headers, timeout=30)
+        response = SESSION.post(endpoint, data=soap_body, headers=headers, timeout=30)
         response.raise_for_status()
 
         # Parse XML response
@@ -91,7 +146,7 @@ def search_by_registration_event(state, month, year):
                 'state': state,
                 'postcode': ''
             }
-            response = requests.get(endpoint, params=params, timeout=30)
+            response = SESSION.get(endpoint, params=params, timeout=30)
             response.raise_for_status()
 
             root = ET.fromstring(response.content)
@@ -135,7 +190,7 @@ def search_by_abn(abn):
     }
 
     try:
-        response = requests.post(endpoint, data=soap_body, headers=headers, timeout=30)
+        response = SESSION.post(endpoint, data=soap_body, headers=headers, timeout=30)
         response.raise_for_status()
 
         # Parse XML response
@@ -228,18 +283,24 @@ def search_by_abn(abn):
 
 def is_legal_business(details):
     """
-    Check if business name contains legal keywords
+    Check if business name matches legal patterns using regex.
+    Uses word boundaries to avoid false positives like 'Lawson', 'Lawler'.
     """
     # Combine all name fields to search
     search_text = ' '.join([
         details.get('Entity Name', ''),
         details.get('Business Names', ''),
         details.get('Trading Names', '')
-    ]).lower()
+    ])
 
-    # Check if any legal keyword is present
-    for keyword in LEGAL_KEYWORDS:
-        if keyword in search_text:
+    # First check exclusions - if any exclusion matches, not a legal business
+    for pattern in EXCLUSION_REGEX:
+        if pattern.search(search_text):
+            return False
+
+    # Check if any legal pattern matches
+    for pattern in LEGAL_REGEX:
+        if pattern.search(search_text):
             return True
 
     return False
@@ -301,10 +362,10 @@ def main():
         sys.exit(1)
 
     print("=" * 60)
-    print("ABN Legal Finder")
+    print("ABN Legal Finder (Optimized)")
     print("=" * 60)
     print(f"Searching: {state} - {month}/{year}")
-    print(f"Keywords: {', '.join(LEGAL_KEYWORDS)}")
+    print(f"Using {len(LEGAL_PATTERNS)} legal patterns with exclusion filters")
     print("=" * 60)
 
     # Step 1: Get list of new ABNs
@@ -314,17 +375,32 @@ def main():
         print("No ABNs found or error occurred")
         sys.exit(0)
 
-    # Step 2: Get details for each ABN and filter for legal businesses
+    # Step 2: Get details for each ABN and filter for legal businesses (concurrent)
     legal_businesses = []
+    processed = 0
+    max_workers = 20  # Number of concurrent requests
 
-    for i, abn in enumerate(abns, 1):
-        print(f"Processing ABN {i}/{len(abns)}: {abn}", end='\r')
+    print(f"Processing {len(abns)} ABNs with {max_workers} concurrent workers...")
 
-        details = search_by_abn(abn)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all ABN lookups
+        future_to_abn = {executor.submit(search_by_abn, abn): abn for abn in abns}
 
-        if details and is_legal_business(details):
-            legal_businesses.append(details)
-            print(f"✓ Legal business found: {details.get('Entity Name', 'N/A')[:50]}...")
+        for future in as_completed(future_to_abn):
+            processed += 1
+            abn = future_to_abn[future]
+
+            try:
+                details = future.result()
+
+                if details and is_legal_business(details):
+                    legal_businesses.append(details)
+                    print(f"✓ [{processed}/{len(abns)}] Legal: {details.get('Entity Name', 'N/A')[:50]}")
+                else:
+                    print(f"  [{processed}/{len(abns)}] Processed: {abn}", end='\r')
+
+            except Exception as e:
+                print(f"✗ [{processed}/{len(abns)}] Error for {abn}: {e}")
 
     print("\n" + "=" * 60)
 
