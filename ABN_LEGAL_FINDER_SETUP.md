@@ -1,7 +1,12 @@
 # ABN Legal Finder - Setup Guide
 
 ## Overview
-This script connects to the Australian Business Register (ABR) API to find newly registered legal businesses in NSW.
+This script connects to the Australian Business Register (ABR) API to find newly registered legal businesses.
+
+### Targeting strategy
+- **NSW** (most lucrative - conveyancing spend): wide net, including conveyancers and sole practitioners.
+- **WA** (commercial work only): larger firms only - sole practitioners and conveyancers are filtered out.
+- **Speed edge**: the daily sweep remembers which ABNs it has already surfaced (`~/Documents/ABN_Legal_Finder/seen_abns.json`) and outputs only brand-new leads each run, sorted hottest-first with a `Priority` (HOT/WARM/STANDARD) and `Lead Score` column.
 
 ## Files Created
 - `abn_legal_finder.py` - Main Python script
@@ -10,22 +15,27 @@ This script connects to the Australian Business Register (ABR) API to find newly
 
 ## Manual Usage
 
-Run the script manually with:
+Daily sweep (recommended - NSW + WA, new leads only):
+```bash
+python3 /home/user/claude/abn_legal_finder.py daily
+```
+
+Or search a single state/month (no de-duplication):
 ```bash
 python3 /home/user/claude/abn_legal_finder.py <month> <year> <state>
 ```
 
 Examples:
 ```bash
-# Search October 2025 NSW registrations
-python3 /home/user/claude/abn_legal_finder.py 10 2025 NSW
-
 # Search November 2025 NSW registrations
 python3 /home/user/claude/abn_legal_finder.py 11 2025 NSW
 
-# Search for current month automatically
-python3 /home/user/claude/abn_legal_finder.py $(date +%-m) $(date +%Y) NSW
+# Search November 2025 WA registrations (firms only)
+python3 /home/user/claude/abn_legal_finder.py 11 2025 WA
 ```
+
+During the first week of each month the daily sweep also re-checks the
+previous month, since ABN registrations can appear with a lag.
 
 ## Automated Execution - Cron Job Setup
 
@@ -96,13 +106,20 @@ Add this line to `/etc/crontab` or `/var/spool/cron/crontabs/user`:
 ### CSV Files
 Results are saved to: `~/Documents/ABN_Legal_Finder/`
 
-Filename format: `legal_businesses_NSW_YYYY_M_TIMESTAMP.csv`
+Filename formats:
+- Daily sweep: `new_leads_TIMESTAMP.csv` (NSW + WA combined, new leads only)
+- Single search: `legal_businesses_STATE_YYYY_M_TIMESTAMP.csv`
 
-CSV includes these columns:
+Rows are sorted hottest lead first. CSV includes these columns:
+- Priority (HOT / WARM / STANDARD)
+- Lead Score
+- Priority Reasons (e.g. "NSW market, conveyancing, incorporated")
+- Search State
 - ABN
 - Entity Name
 - Business Names
 - Trading Names
+- Matched Keywords
 - Entity Type
 - ABN Status
 - State
@@ -111,22 +128,26 @@ CSV includes these columns:
 - ACN
 - ABN Status Date
 
+### Lead scoring
+- NSW lead: +30 (more lucrative market)
+- Conveyancing keyword in NSW: +30
+- Incorporated (has ACN): +20
+- GST registered: +10
+- Firm structure (not individual/sole trader): +10
+
+HOT >= 60, WARM >= 40, otherwise STANDARD.
+
 ### Log Files
 Execution logs are saved to: `~/Documents/ABN_Legal_Finder/logs/`
 
 Filename format: `cron_YYYYMMDD_HHMMSS.log`
 
 ## Legal Business Keywords
-The script filters for entities containing any of these keywords (case-insensitive):
-- lawyer
-- law
-- solicitor
-- legal
-- conveyancer
-- conveyancing
-- barrister
-- attorney
-- notary
+Keywords are matched on word boundaries (so "law" matches "Smith Law Pty Ltd" but not "Lawson Plumbing"), case-insensitive.
+
+NSW (and any other state): lawyer(s), law, solicitor(s), legal, barrister(s), attorney(s), notary, conveyancer(s), conveyancing, settlements
+
+WA: same list **minus** the conveyancing keywords, and sole practitioners (Individual/Sole Trader entity types) are excluded - only firms doing commercial work are surfaced.
 
 ## API Details
 - Base URL: https://abr.business.gov.au/ABRXMLSearch/AbrXmlSearch.asmx
